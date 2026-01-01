@@ -1,8 +1,10 @@
 {
-  "devDependencies": {
-    "@types/node": "^25.0.3"
-  },
-  "dependencies": {
-    "parquetjs-lite": "^0.8.7"
+  "name": "tape-room",
+  "private": true,
+  "workspaces": ["dashboard", "encoder"],
+  "scripts": {
+    "dev": "npm -w dashboard run dev",
+    "build": "npm -w dashboard run build",
+    "encode": "npm -w encoder run encode"
   }
 }
