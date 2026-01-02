@@ -1,0 +1,16 @@
+{
+  "name": "encoder",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "encode": "tsx src/encode.ts"
+  },
+  "dependencies": {
+    "parquetjs-lite": "^0.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0"
+  }
+}

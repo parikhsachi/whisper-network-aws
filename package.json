@@ -1,5 +1,5 @@
 {
-  "name": "tape-room",
+  "name": "whisper-network-aws",
   "private": true,
   "workspaces": ["dashboard", "encoder"],
   "scripts": {
@@ -8,3 +8,4 @@
     "encode": "npm -w encoder run encode"
   }
 }
+
