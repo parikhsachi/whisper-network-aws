@@ -10,7 +10,6 @@ type TapeRow = {
   location_zone: string;
   signal_weight: number;
   signal_class: string;
-  dt: string;
 };
 
 const TOPICS = [
@@ -67,7 +66,6 @@ function generateRows(
   for (let h = 0; h < hours; h++) {
     const t = new Date(start.getTime() + h * 3600_000);
     const time_bucket = isoHour(t);
-    const dt = isoDate(t);
 
     for (let i = 0; i < rowsPerHour; i++) {
       const topic = rand(TOPICS);
@@ -89,7 +87,6 @@ function generateRows(
         location_zone: zone,
         signal_weight,
         signal_class,
-        dt,
       });
     }
   }
@@ -104,7 +101,6 @@ async function writeParquet(outPath: string, rows: TapeRow[]) {
     location_zone: { type: "UTF8" },
     signal_weight: { type: "DOUBLE" },
     signal_class: { type: "UTF8" },
-    dt: { type: "UTF8" },
   });
 
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
