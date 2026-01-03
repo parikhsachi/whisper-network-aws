@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+export AWS_PAGER=""
 # ========= GLOBAL =========
 export REGION="us-west-2"
 
