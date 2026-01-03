@@ -6,6 +6,7 @@ dist/
 build/
 out/
 states/
+scripts/
 
 # env + secrets
 .env
