@@ -37,7 +37,9 @@ app.post("/api/room/join", (req, res) => {
       chat: [], // {id, ts, from, text}
       tapes: new Map(), // role -> array of tape objects
       puzzle: makePuzzle(),
-      analyticsLog: [] // protected query executions
+      analyticsLog: [], // protected query executions
+      scores: { A: 0, B: 0 },
+      round: { winnerRole: null, solvedAt: null, puzzleId: null },
     });
   }
 
@@ -141,6 +143,10 @@ app.post("/api/puzzle/guess", (req, res) => {
       text: `Puzzle solved by ${member.role}. New puzzle generated.`
     });
     room.puzzle = makePuzzle();
+    room.round.puzzleId = room.puzzle.id;
+    room.round.winnerRole = null;
+    room.round.solvedAt = null;
+    
     broadcast(roomCode, {
       type: "puzzle_new",
       puzzle: {
@@ -238,6 +244,7 @@ function randomRoomCode() {
 }
 
 const PORT = process.env.PORT || 8787;
-server.listen(PORT, () => {
-  console.log(`server on http://localhost:${PORT}`);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`server on http://0.0.0.0:${PORT}`);
 });
+

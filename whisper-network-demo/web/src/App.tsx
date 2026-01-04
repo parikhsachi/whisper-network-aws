@@ -51,14 +51,20 @@ function nowTime(ts: number) {
   const ss = String(d.getSeconds()).padStart(2, "0");
   return `${hh}:${mm}:${ss}`;
 }
+function getQueryParams() {
+  const p = new URLSearchParams(window.location.search);
+  return {
+    room: p.get("room") || "",
+    role: (p.get("role") === "B"
+      ? "B"
+      : p.get("role") === "A"
+      ? "A"
+      : "") as "" | "A" | "B",
+    name: p.get("name") || ""
+  };
+}
 
 export default function App() {
-  const [stage, setStage] = useState<"join" | "ops">("join");
-
-  const [roomCode, setRoomCode] = useState("");
-  const [playerName, setPlayerName] = useState("agent");
-  const [role, setRole] = useState<"A" | "B">("A");
-
   const [sessionId, setSessionId] = useState("");
   const [presence, setPresence] = useState<{ name: string; role: string }[]>([]);
   const [chat, setChat] = useState<any[]>([]);
@@ -71,6 +77,35 @@ export default function App() {
 
   const [tapeText, setTapeText] = useState("");
   const [tapeUploads, setTapeUploads] = useState<{ role: string; count: number; ts: number }[]>([]);
+  const [stage, setStage] = useState<"join" | "ops">("join");
+
+  const [roomCode, setRoomCode] = useState("");
+  const [playerName, setPlayerName] = useState("agent");
+  const [role, setRole] = useState<"A" | "B">("A");
+  useEffect(() => {
+    const qp = getQueryParams();
+
+    if (qp.room) setRoomCode(qp.room);
+    if (qp.role) setRole(qp.role);
+    if (qp.name) setPlayerName(qp.name);
+  }, []);
+  useEffect(() => {
+  const qp = getQueryParams();
+
+  // Auto-join ONLY if:
+  // - still on join screen
+  // - URL has room, role, and name
+  if (
+    stage === "join" &&
+    qp.room &&
+    qp.role &&
+    qp.name
+  ) {
+    join();
+  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [stage]);
+
 
   const [queries, setQueries] = useState<any[]>([]);
   const [analytics, setAnalytics] = useState<any>({
@@ -102,9 +137,22 @@ export default function App() {
     setSessionId(data.sessionId);
     setPuzzle(data.puzzle);
     setStage("ops");
+    const shareUrl =
+      `${window.location.origin}/` +
+      `?room=${encodeURIComponent(data.roomCode)}` +
+      `&role=${encodeURIComponent(role)}` +
+      `&name=${encodeURIComponent(playerName)}`;
+
+    window.history.replaceState({}, "", shareUrl);
+
     setStatusLine(`SYSTEM: connected to COLLAB ${data.roomCode} as ${role}`);
 
-    const ws = new WebSocket("ws://localhost:8787");
+    const WS_URL =
+      (window.location.protocol === "https:" ? "wss://" : "ws://") +
+      window.location.hostname +
+      ":8787";
+    const ws = new WebSocket(WS_URL);
+
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -149,6 +197,12 @@ export default function App() {
         setPuzzleGuess("");
         setPuzzleProgressState(null);
       }
+      if (msg.type === "winner") {
+        setStatusLine(`ROUND WINNER: ${msg.winnerRole}  |  SCORE A:${msg.scores.A} B:${msg.scores.B}`);
+        // store somewhere to render in dashboard
+        setAnalytics((a:any) => ({ ...a, scores: msg.scores, lastWinner: msg.winnerRole }));
+      }
+
 
       if (msg.type === "puzzle_progress") {
         setPuzzleProgressState(msg.progress);
@@ -305,7 +359,7 @@ export default function App() {
             </div>
           </Window>
 
-          <Window title="SCRIPTS" right="PROTECTED QUERIES">
+          <Window title="SCRIPTS" right="PROTECTED QUERIES" grow={1}>
             <div className="queries">
               {queries.map((q) => (
                 <div key={q.name} className="qrow">
@@ -321,7 +375,7 @@ export default function App() {
         </div>
 
         <div className="col">
-          <Window title="TRANSFER" right="CHAT LINK">
+          <Window title="TRANSFER" right="CHAT LINK" grow={2}>
             <ChatPanel
               chat={chat}
               onSend={sendChat}
@@ -355,9 +409,9 @@ export default function App() {
   );
 }
 
-function Window(props: { title: string; right?: string; children: any }) {
+function Window(props: { title: string; right?: string; grow?: number; children: any }) {
   return (
-    <div className="win">
+    <div className="win" style={{ flex: props.grow ?? 1 }}>
       <div className="winbar">
         <div className="wintitle">{props.title}</div>
         <div className="winright">{props.right || ""}</div>
@@ -454,6 +508,18 @@ function Dashboard(props: { analytics: any }) {
             <div className="dim">Run: top_tokens_shared</div>
           )}
         </div>
+        <div className="card">
+        <div className="cardtitle">SCOREBOARD</div>
+        {props.analytics.scores ? (
+          <div className="big">
+            <div>A: {props.analytics.scores.A}</div>
+            <div>B: {props.analytics.scores.B}</div>
+            <div className="dim">Last winner: {props.analytics.lastWinner || "—"}</div>
+          </div>
+        ) : (
+          <div className="dim">No rounds won yet.</div>
+        )}
+      </div>
 
         <div className="card">
           <div className="cardtitle">TIMELINE</div>
