@@ -6,8 +6,7 @@ import { nanoid } from "nanoid";
 import http from "http";
 
 import { rooms } from "./state.js";
-import { makePuzzle, checkPuzzleGuess, puzzleProgress } from "./puzzle.js";
-import { addTape, runProtectedQuery, listProtectedQueries } from "./protectedQueries.js";
+import { makePuzzle, checkGuess } from "./puzzle.js";
 
 const app = express();
 app.use(cors());
@@ -16,34 +15,71 @@ app.use(express.json({ limit: "2mb" }));
 app.get("/health", (_, res) => res.json({ ok: true }));
 
 /**
- * Helpers
+ * Scoring model:
+ * - Each round starts at 10.0 points
+ * - Each guess costs 1.0 (so maxTurns=6 means guess spam is expensive)
+ * - Each tape upload costs 0.1 (a "percentage point" on a 0–10 scale)
+ * - Winner bonus +1.0
+ * - If lockout: both get 0/10
+ *
+ * You can tune later.
  */
-function randomRoomCode() {
-  return Math.random().toString(36).slice(2, 6).toUpperCase();
-}
 function clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n));
 }
-function ensureRoomRound(room) {
-  if (!room.scores) room.scores = { A: 0, B: 0 };
-  if (!room.round) {
-    room.round = {
-      puzzleId: room.puzzle?.id || null,
+
+function randomRoomCode() {
+  return Math.random().toString(36).slice(2, 6).toUpperCase();
+}
+
+function ensureRoom(code) {
+  if (rooms.has(code)) return rooms.get(code);
+
+  const puzzle = makePuzzle();
+  const room = {
+    code,
+    createdAt: Date.now(),
+    members: new Map(), // sessionId -> { name, role }
+    chat: [],
+
+    puzzle,
+
+    // PRIVATE per-role Wordle boards (never broadcast)
+    boards: {
+      A: { guesses: [] }, // [{guess, feedback}]
+      B: { guesses: [] }
+    },
+
+    // "tapes" = shared/aggregate guess submissions (publicly visible)
+    tapes: {
+      A: [], // [{id, ts, guess}]
+      B: []
+    },
+
+    // Round / scoring state
+    round: {
+      puzzleId: puzzle.id,
       startedAt: Date.now(),
       winnerRole: null,
       solvedAt: null,
       lockout: false,
+
+      // for scoring + dashboard
       attemptsByRole: { A: 0, B: 0 },
-      helpByRole: { A: 0, B: 0 }
-    };
-  } else {
-    // ensure nested objects exist (in case of older room objects)
-    if (!room.round.attemptsByRole) room.round.attemptsByRole = { A: 0, B: 0 };
-    if (!room.round.helpByRole) room.round.helpByRole = { A: 0, B: 0 };
-    if (room.round.lockout == null) room.round.lockout = false;
-  }
+      tapeUploadsByRole: { A: 0, B: 0 }
+    },
+
+    scores: { A: 0, B: 0 } // total
+  };
+
+  rooms.set(code, room);
+  return room;
 }
+
 function resetRound(room) {
+  room.puzzle = makePuzzle();
+  room.boards = { A: { guesses: [] }, B: { guesses: [] } };
+  room.tapes = { A: [], B: [] };
   room.round = {
     puzzleId: room.puzzle.id,
     startedAt: Date.now(),
@@ -51,75 +87,129 @@ function resetRound(room) {
     solvedAt: null,
     lockout: false,
     attemptsByRole: { A: 0, B: 0 },
-    helpByRole: { A: 0, B: 0 }
+    tapeUploadsByRole: { A: 0, B: 0 }
   };
 }
-function computeRoundScores(room, winnerRole) {
-  const attempts = room.round.attemptsByRole;
-  const help = room.round.helpByRole;
 
-  const roles = ["A", "B"];
-  const out = {};
+// --- DASHBOARD (aggregates only) ---
 
-  for (const r of roles) {
-    // Efficiency: fewer guesses => higher score (0..6)
-    const eff = clamp(6 - (attempts[r] || 0), 0, 6);
+function lettersByState(guesses) {
+  const greens = new Set();
+  const yellows = new Set();
+  const grays = new Set();
+  const greensPos = new Set(); // "A@2"
+  const yellowsPos = new Set();
 
-    // Help: 2 structured help signals => full 2 points
-    const helpPts = Math.min(2, ((help[r] || 0) / 2));
+  for (const g of guesses) {
+    const fb = g.feedback || [];
+    for (let i = 0; i < fb.length; i++) {
+      const ch = fb[i]?.ch;
+      const st = fb[i]?.state;
+      if (!ch) continue;
 
-    // Speed: winner +2, other +1 only if they helped at least once
-    let speedPts = 0;
-    if (winnerRole) {
-      if (r === winnerRole) speedPts = 2;
-      else speedPts = (help[r] || 0) > 0 ? 1 : 0;
+      if (st === "correct") {
+        greens.add(ch);
+        greensPos.add(`${ch}@${i}`);
+      } else if (st === "present") {
+        yellows.add(ch);
+        yellowsPos.add(`${ch}@${i}`);
+      } else {
+        grays.add(ch);
+      }
     }
-
-    out[r] = Math.round((eff + helpPts + speedPts) * 10) / 10; // keep one decimal
   }
 
-  return out;
+  return { greens, yellows, grays, greensPos, yellowsPos };
 }
 
-/**
- * Create or join room
- */
+function jaccard(a, b) {
+  const A = new Set(a);
+  const B = new Set(b);
+  const inter = [...A].filter((x) => B.has(x)).length;
+  const uni = new Set([...A, ...B]).size || 1;
+  return inter / uni;
+}
+
+function computeSimilarity(room) {
+  const A = room.boards.A.guesses;
+  const B = room.boards.B.guesses;
+
+  const a = lettersByState(A);
+  const b = lettersByState(B);
+
+  const greenLetterSim = jaccard(a.greens, b.greens);
+  const yellowLetterSim = jaccard(a.yellows, b.yellows);
+  const grayLetterSim = jaccard(a.grays, b.grays);
+
+  const greenPlacementSim = jaccard(a.greensPos, b.greensPos);
+  const yellowPlacementSim = jaccard(a.yellowsPos, b.yellowsPos);
+
+  // shared uploaded tape guesses (exact match)
+  const tapesA = new Set(room.tapes.A.map((t) => t.guess));
+  const tapesB = new Set(room.tapes.B.map((t) => t.guess));
+  const sharedTapeGuesses = [...tapesA].filter((g) => tapesB.has(g));
+
+  return {
+    greenLetterSim,
+    yellowLetterSim,
+    grayLetterSim,
+    greenPlacementSim,
+    yellowPlacementSim,
+    sharedTapeGuesses,
+    sharedTapeCount: sharedTapeGuesses.length
+  };
+}
+
+function computeRoundScore(room, role) {
+  if (room.round.lockout) return 0;
+
+  const attempts = room.round.attemptsByRole[role] || 0;
+  const tapeUploads = room.round.tapeUploadsByRole[role] || 0;
+
+  // base 10, guesses cost 1.0 each, tape uploads cost 0.1 each
+  let score = 10 - attempts * 1.0 - tapeUploads * 0.1;
+  score = clamp(score, 0, 10);
+
+  if (room.round.winnerRole === role) score = clamp(score + 1.0, 0, 10);
+
+  // keep one decimal
+  return Math.round(score * 10) / 10;
+}
+
+function dashPayload(room) {
+  const sim = computeSimilarity(room);
+  return {
+    puzzleId: room.round.puzzleId,
+    attemptsByRole: room.round.attemptsByRole,
+    tapeUploadsByRole: room.round.tapeUploadsByRole,
+    winnerRole: room.round.winnerRole,
+    lockout: room.round.lockout,
+
+    // ✅ total scoreboard (persistent across rounds)
+    totalScores: room.scores,
+
+    similarity: {
+      greenLettersPct: Math.round(sim.greenLetterSim * 100),
+      yellowLettersPct: Math.round(sim.yellowLetterSim * 100),
+      grayLettersPct: Math.round(sim.grayLetterSim * 100),
+      greenPlacementPct: Math.round(sim.greenPlacementSim * 100),
+      yellowPlacementPct: Math.round(sim.yellowPlacementSim * 100)
+    },
+
+    sharedTapeCount: sim.sharedTapeCount,
+    sharedTapeGuesses: sim.sharedTapeGuesses.slice(-5)
+  };
+}
+
+
+// --- API ---
+
 app.post("/api/room/join", (req, res) => {
   const { roomCode, playerName, role } = req.body || {};
-  if (!playerName || !role) {
-    return res.status(400).json({ error: "playerName and role required" });
-  }
+  if (!playerName || !role) return res.status(400).json({ error: "playerName and role required" });
 
   const code = (roomCode && String(roomCode).trim()) || randomRoomCode();
-
-  if (!rooms.has(code)) {
-    const puzzle = makePuzzle();
-    const room = {
-      code,
-      createdAt: Date.now(),
-      members: new Map(), // sessionId -> { name, role }
-      chat: [], // {id, ts, from, name, text}
-      tapes: new Map(), // role -> array of tape objects
-      puzzle,
-      analyticsLog: [], // protected query executions
-
-      // scoring + round state
-      scores: { A: 0, B: 0 },
-      round: {
-        puzzleId: puzzle.id,
-        startedAt: Date.now(),
-        winnerRole: null,
-        solvedAt: null,
-        lockout: false,
-        attemptsByRole: { A: 0, B: 0 },
-        helpByRole: { A: 0, B: 0 }
-      }
-    };
-    rooms.set(code, room);
-  }
-
-  const room = rooms.get(code);
-  ensureRoomRound(room);
+  const room = ensureRoom(code);
 
   const sessionId = nanoid();
   room.members.set(sessionId, { name: playerName, role });
@@ -131,24 +221,14 @@ app.post("/api/room/join", (req, res) => {
       id: room.puzzle.id,
       title: room.puzzle.title,
       prompt: room.puzzle.prompt,
-      ciphertext: room.puzzle.ciphertext // if you switched to KEYLE, this may be undefined; safe to omit on UI
-    },
-    // surface scoring state for UI
-    scores: room.scores,
-    round: room.round
+      keyLen: room.puzzle.keyLen,
+      maxTurns: room.puzzle.maxTurns
+    }
   });
 });
 
-/**
- * List allowed "protected queries"
- */
-app.get("/api/protected-queries", (_, res) => {
-  res.json({ queries: listProtectedQueries() });
-});
-
-/**
- * Upload private tape data (never shared raw)
- */
+// Upload tapes: in your new logic, tapes are SHARED guesses (aggregate info).
+// Each upload costs the uploader points (0.1 per tape line).
 app.post("/api/tapes/upload", (req, res) => {
   const { roomCode, sessionId, items } = req.body || {};
   const room = rooms.get(roomCode);
@@ -157,87 +237,50 @@ app.post("/api/tapes/upload", (req, res) => {
   const member = room.members.get(sessionId);
   if (!member) return res.status(401).json({ error: "invalid session" });
 
-  ensureRoomRound(room);
-
   const safeItems = Array.isArray(items) ? items : [];
-  const added = safeItems.map((t) => addTape(room, member.role, t));
+  const guesses = safeItems
+    .map((x) => String(x?.text || "").toUpperCase().replace(/[^A-Z]/g, "").trim())
+    .filter(Boolean)
+    .slice(0, 25);
 
+  if (!guesses.length) return res.json({ ok: true, added: 0 });
+
+  for (const g of guesses) {
+    room.tapes[member.role].push({ id: nanoid(), ts: Date.now(), guess: g });
+  }
+
+  // scoring penalty
+  room.round.tapeUploadsByRole[member.role] += guesses.length;
+
+  // notify both (no raw private boards)
   broadcast(roomCode, {
     type: "tape_uploaded",
     role: member.role,
-    count: added.length
+    count: guesses.length
   });
 
-  res.json({ ok: true, added: added.length });
-});
-
-/**
- * Run a protected query (clean-room mimic)
- */
-app.post("/api/protected-query/run", (req, res) => {
-  const { roomCode, sessionId, queryName, params } = req.body || {};
-  const room = rooms.get(roomCode);
-  if (!room) return res.status(404).json({ error: "room not found" });
-
-  const member = room.members.get(sessionId);
-  if (!member) return res.status(401).json({ error: "invalid session" });
-
-  try {
-    const result = runProtectedQuery(room, queryName, params);
-
-    room.analyticsLog.push({
-      id: nanoid(),
-      ts: Date.now(),
-      byRole: member.role,
-      queryName
-    });
-
+  // overlap detection (shared tape guess)
+  const aSet = new Set(room.tapes.A.map((t) => t.guess));
+  const bSet = new Set(room.tapes.B.map((t) => t.guess));
+  const shared = [...aSet].filter((x) => bSet.has(x));
+  if (shared.length) {
+    const last = shared[shared.length - 1];
     broadcast(roomCode, {
-      type: "analytics_updated",
-      byRole: member.role,
-      queryName,
-      result
+      type: "tape_overlap",
+      guess: last,
+      sharedCount: shared.length
     });
-
-    res.json({ ok: true, result });
-  } catch (e) {
-    res.status(400).json({ error: e?.message || "query failed" });
   }
-});
 
-/**
- * Structured help signals (used for scoring)
- */
-app.post("/api/help", (req, res) => {
-  const { roomCode, sessionId, kind, payload } = req.body || {};
-  const room = rooms.get(roomCode);
-  if (!room) return res.status(404).json({ error: "room not found" });
-
-  const member = room.members.get(sessionId);
-  if (!member) return res.status(401).json({ error: "invalid session" });
-
-  ensureRoomRound(room);
-
-  room.round.helpByRole[member.role] = (room.round.helpByRole[member.role] || 0) + 1;
-
+  // auto-update dashboard
   broadcast(roomCode, {
-    type: "help_signal",
-    fromRole: member.role,
-    kind: kind || "hint",
-    payload: payload || null,
-    helpByRole: room.round.helpByRole
+    type: "dash_update",
+    dash: dashPayload(room)
   });
 
-  res.json({ ok: true, helpByRole: room.round.helpByRole });
+  res.json({ ok: true, added: guesses.length });
 });
 
-/**
- * Puzzle guess endpoint
- * - tracks attempts by role
- * - locks after winner
- * - on solve: assigns round score + total score, broadcasts winner, starts next round
- * - on lockout: broadcasts lockout + 0/10 rule, starts next round
- */
 app.post("/api/puzzle/guess", (req, res) => {
   const { roomCode, sessionId, guess } = req.body || {};
   const room = rooms.get(roomCode);
@@ -246,133 +289,162 @@ app.post("/api/puzzle/guess", (req, res) => {
   const member = room.members.get(sessionId);
   if (!member) return res.status(401).json({ error: "invalid session" });
 
-  ensureRoomRound(room);
-
-  // Guard: already have a winner this round
-  if (room.round.winnerRole) {
+  // round locked?
+  if (room.round.winnerRole || room.round.lockout) {
     return res.json({
       ok: true,
-      solved: false,
       locked: true,
-      winnerRole: room.round.winnerRole,
-      progress: puzzleProgress(room.puzzle),
-      hint: "ROUND LOCKED — winner already declared",
-      scores: room.scores,
-      round: room.round
+      hint: room.round.lockout ? "LOCKOUT — round ended." : "ROUND LOCKED — winner already declared.",
+      dash: dashPayload(room)
     });
   }
 
-  const g = String(guess || "").trim();
+  const result = checkGuess(room.puzzle, guess);
 
-  // For Wordle-style puzzles, only count attempts if guess is valid length;
-  // but since your checkPuzzleGuess handles validation, we count on every call here.
-  room.round.attemptsByRole[member.role] = (room.round.attemptsByRole[member.role] || 0) + 1;
+  if (!result.ok) {
+    return res.json({
+      ok: false,
+      hint: result.error,
+      dash: dashPayload(room),
+      progress: {
+        keyLen: room.puzzle.keyLen,
+        maxTurns: room.puzzle.maxTurns,
+        guesses: room.boards[member.role].guesses
+      }
+    });
+  }
 
-  const outcome = checkPuzzleGuess(room.puzzle, g);
-
-  // Broadcast progress after each attempt
-  broadcast(roomCode, {
-    type: "puzzle_progress",
-    progress: puzzleProgress(room.puzzle),
-    solved: outcome.solved,
-    byRole: member.role
+  // record private guess for this role (never broadcast)
+  room.boards[member.role].guesses.push({
+    guess: result.cleaned,
+    feedback: result.feedback,
+    ts: Date.now()
   });
 
-  // LOCKOUT case: both get 0/10 (your requirement)
-  if (outcome.lockout) {
-    room.round.lockout = true;
+  room.round.attemptsByRole[member.role] += 1;
 
-    broadcast(roomCode, {
-      type: "lockout",
-      roundScores: { A: 0, B: 0 },
-      totalScores: room.scores, // unchanged
-      attemptsByRole: room.round.attemptsByRole,
-      helpByRole: room.round.helpByRole
-    });
+  // notify opponent that a guess happened (no board leakage)
+  broadcast(roomCode, {
+    type: "opponent_activity",
+    role: member.role,
+    kind: "guess"
+  });
 
-    // Start next round
-    room.puzzle = makePuzzle();
-    resetRound(room);
+  // lockout?
+  const turnsUsed = room.boards[member.role].guesses.length;
+  const maxTurns = room.puzzle.maxTurns;
 
-    broadcast(roomCode, {
-      type: "puzzle_new",
-      puzzle: {
-        id: room.puzzle.id,
-        title: room.puzzle.title,
-        prompt: room.puzzle.prompt,
-        ciphertext: room.puzzle.ciphertext
-      },
-      round: room.round
-    });
-
-    return res.json({
-      ok: true,
-      ...outcome,
-      progress: puzzleProgress(room.puzzle),
-      scores: room.scores,
-      round: room.round
-    });
-  }
-
-  // SOLVED case: compute scores + broadcast winner + start next round
-  if (outcome.solved) {
+  // winner?
+  if (result.solved) {
     room.round.winnerRole = member.role;
     room.round.solvedAt = Date.now();
 
-    const roundScores = computeRoundScores(room, member.role);
-    room.scores.A += roundScores.A;
-    room.scores.B += roundScores.B;
+// ✅ Winner keeps their computed score, loser gets 1 point
+const winner = member.role;              // "A" or "B"
+const loser = winner === "A" ? "B" : "A";
+
+const winnerPts = computeRoundScore(room, winner);
+const loserPts = 1;
+
+const roundScores = {
+  A: winner === "A" ? winnerPts : loserPts,
+  B: winner === "B" ? winnerPts : loserPts
+};
+
+room.scores.A += roundScores.A;
+room.scores.B += roundScores.B;
+
 
     broadcast(roomCode, {
       type: "winner",
       winnerRole: member.role,
       roundScores,
       totalScores: room.scores,
-      attemptsByRole: room.round.attemptsByRole,
-      helpByRole: room.round.helpByRole,
-      solvedAt: room.round.solvedAt
+      dash: dashPayload(room)
     });
 
-    // Next round
-    room.puzzle = makePuzzle();
-    resetRound(room);
-
-    broadcast(roomCode, {
-      type: "puzzle_new",
-      puzzle: {
-        id: room.puzzle.id,
-        title: room.puzzle.title,
-        prompt: room.puzzle.prompt,
-        ciphertext: room.puzzle.ciphertext
-      },
-      round: room.round
-    });
+    // start next round shortly (so UI can show winner)
+    setTimeout(() => {
+      resetRound(room);
+      broadcast(roomCode, {
+        type: "puzzle_new",
+        puzzle: {
+          id: room.puzzle.id,
+          title: room.puzzle.title,
+          prompt: room.puzzle.prompt,
+          keyLen: room.puzzle.keyLen,
+          maxTurns: room.puzzle.maxTurns
+        },
+        dash: dashPayload(room)
+      });
+    }, 800);
 
     return res.json({
       ok: true,
-      ...outcome,
-      progress: puzzleProgress(room.puzzle),
-      scores: room.scores,
-      round: room.round,
-      roundScores
+      solved: true,
+      hint: "ACCESS GRANTED.",
+      progress: {
+        keyLen: room.puzzle.keyLen,
+        maxTurns: room.puzzle.maxTurns,
+        guesses: room.boards[member.role].guesses
+      },
+      dash: dashPayload(room)
     });
   }
 
-  // Not solved, not lockout
-  res.json({
+  // if either role reaches max turns and still unsolved => global lockout (both 0/10)
+  const aTurns = room.boards.A.guesses.length;
+  const bTurns = room.boards.B.guesses.length;
+  if (aTurns >= maxTurns && bTurns >= maxTurns) {
+    room.round.lockout = true;
+
+    broadcast(roomCode, {
+      type: "lockout",
+      dash: dashPayload(room),
+      roundScores: { A: 0, B: 0 },
+      totalScores: room.scores
+    });
+
+    setTimeout(() => {
+      resetRound(room);
+      broadcast(roomCode, {
+        type: "puzzle_new",
+        puzzle: {
+          id: room.puzzle.id,
+          title: room.puzzle.title,
+          prompt: room.puzzle.prompt,
+          keyLen: room.puzzle.keyLen,
+          maxTurns: room.puzzle.maxTurns
+        },
+        dash: dashPayload(room)
+      });
+    }, 800);
+  }
+
+  // update dashboard every guess
+  broadcast(roomCode, {
+    type: "dash_update",
+    dash: dashPayload(room)
+  });
+
+  // response includes ONLY this user's private board
+  return res.json({
     ok: true,
-    ...outcome,
-    progress: puzzleProgress(room.puzzle),
-    scores: room.scores,
-    round: room.round
+    solved: false,
+    hint: "ACCESS DENIED.",
+    progress: {
+      keyLen: room.puzzle.keyLen,
+      maxTurns: room.puzzle.maxTurns,
+      guesses: room.boards[member.role].guesses
+    },
+    dash: dashPayload(room)
   });
 });
 
-/**
- * ---- websocket for chat + realtime updates ----
- */
+// ---- websocket for chat + realtime updates ----
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
+
 const clients = new Map(); // ws -> { roomCode, sessionId }
 
 wss.on("connection", (ws) => {
@@ -392,8 +464,6 @@ wss.on("connection", (ws) => {
         return;
       }
 
-      ensureRoomRound(room);
-
       clients.set(ws, { roomCode, sessionId });
 
       ws.send(
@@ -404,10 +474,10 @@ wss.on("connection", (ws) => {
             id: room.puzzle.id,
             title: room.puzzle.title,
             prompt: room.puzzle.prompt,
-            ciphertext: room.puzzle.ciphertext
+            keyLen: room.puzzle.keyLen,
+            maxTurns: room.puzzle.maxTurns
           },
-          scores: room.scores,
-          round: room.round
+          dash: dashPayload(room)
         })
       );
 

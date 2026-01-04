@@ -1,18 +1,24 @@
+// server/src/puzzle.js
 import { nanoid } from "nanoid";
 
-// "KEYLE" — Wordle-style guessing for a 4-letter KEY.
-// This is a game mechanic, not real-world hacking guidance.
+// KEYLE: Wordle-style key recovery (demo-safe).
+// Private boards per role; only aggregates are shared via "tapes".
 
-const WORDS4 = [
-  "ECHO", "RIFT", "NOVA", "BYTE", "ZERO", "DUSK", "LIME", "BOLT",
-  "MINT", "CROW", "FANG", "VOID", "GRID", "NODE", "PULSE", "DARK",
-  "WISP", "HALO", "MOON", "SPIN", "RUNE", "FUSE", "SALT", "KNOT"
-].filter(w => w.length === 4);
+const KEY_LEN = 5; // change to 6 later if you want
+const MAX_TURNS = 3;
 
-const PHRASES = [
-  "SIGNAL LOCKED. RECOVER THE KEY.",
-  "INTERCEPT STORED. DERIVE ACCESS KEY.",
-  "CHANNEL SEALED. AUTHORIZE WITH KEY."
+// Keep this list small for demo. You can expand later.
+const WORDS = [
+  "CRYPT",
+  "AGENT",
+  "TRACE",
+  "PROXY",
+].filter((w) => w.length === KEY_LEN);
+
+const PROMPTS = [
+  "Recover the access key. Private boards. Aggregates only.",
+  "Two agents race to recover the key. Share only via tapes.",
+  "Upload tapes to share guesses (costs points). First solver wins."
 ];
 
 function randInt(n) {
@@ -20,49 +26,52 @@ function randInt(n) {
 }
 
 function pickKey() {
-  return WORDS4[randInt(WORDS4.length)];
+  return WORDS[randInt(WORDS.length)];
 }
 
 export function makePuzzle() {
   const key = pickKey();
-  const prompt = PHRASES[randInt(PHRASES.length)];
-
     console.log("PUZZLE KEY:", key);
 
   return {
     id: nanoid(),
     createdAt: Date.now(),
     title: "KEYLE: ACCESS KEY RECOVERY",
-    prompt,
-    key,              // secret
-    maxTurns: 6,
-    guesses: [],      // [{ guess: "ECHO", feedback: [...] }]
-    solved: false
+    prompt: PROMPTS[randInt(PROMPTS.length)],
+    key, // secret (server-side only)
+    keyLen: KEY_LEN,
+    maxTurns: MAX_TURNS
   };
 }
 
-// Returns Wordle-style feedback array for guess vs answer.
-// Each element: { ch: "E", state: "correct" | "present" | "absent" }
+export function normalizeGuess(guess, keyLen) {
+  return String(guess || "")
+    .toUpperCase()
+    .replace(/[^A-Z]/g, "")
+    .slice(0, keyLen);
+}
+
 export function scoreGuess(answer, guess) {
   const A = answer.toUpperCase();
   const G = guess.toUpperCase();
 
-  // Count letters in answer for "present" accounting
   const counts = {};
   for (const ch of A) counts[ch] = (counts[ch] || 0) + 1;
 
-  const fb = Array(4).fill(null).map((_, i) => ({ ch: G[i] || "", state: "absent" }));
+  const fb = Array(A.length)
+    .fill(null)
+    .map((_, i) => ({ ch: G[i] || "", state: "absent" }));
 
-  // Pass 1: correct positions
-  for (let i = 0; i < 4; i++) {
+  // correct positions
+  for (let i = 0; i < A.length; i++) {
     if (G[i] === A[i]) {
       fb[i].state = "correct";
       counts[G[i]] -= 1;
     }
   }
 
-  // Pass 2: present letters (wrong position)
-  for (let i = 0; i < 4; i++) {
+  // present letters
+  for (let i = 0; i < A.length; i++) {
     if (fb[i].state === "correct") continue;
     const ch = G[i];
     if (counts[ch] > 0) {
@@ -74,41 +83,24 @@ export function scoreGuess(answer, guess) {
   return fb;
 }
 
-export function checkPuzzleGuess(puzzle, guess) {
-  if (puzzle.solved) {
-    return { solved: true, hint: "ROUND COMPLETE.", feedback: null };
-  }
+export function checkGuess(puzzle, guessRaw) {
+  const cleaned = normalizeGuess(guessRaw, puzzle.keyLen);
 
-  const cleaned = String(guess || "").toUpperCase().replace(/[^A-Z]/g, "").slice(0, 4);
-
-  if (cleaned.length !== 4) {
-    return { solved: false, hint: "ENTER A 4-LETTER KEY (A–Z).", feedback: null };
+  if (cleaned.length !== puzzle.keyLen) {
+    return {
+      ok: false,
+      error: `Enter a ${puzzle.keyLen}-letter guess (A–Z).`,
+      cleaned
+    };
   }
 
   const feedback = scoreGuess(puzzle.key, cleaned);
-  puzzle.guesses.push({ guess: cleaned, feedback });
-
   const solved = cleaned === puzzle.key;
-  puzzle.solved = solved;
 
-  if (solved) {
-    return { solved: true, hint: `ACCESS GRANTED. KEY="${puzzle.key}"`, feedback };
-  }
-
-  const remaining = puzzle.maxTurns - puzzle.guesses.length;
-  if (remaining <= 0) {
-    puzzle.solved = true; // end round (lost)
-    return { solved: false, hint: `LOCKOUT. KEY WAS "${puzzle.key}"`, feedback, lockout: true };
-  }
-
-  return { solved: false, hint: `ACCESS DENIED. ${remaining} TRIES LEFT.`, feedback };
-}
-
-export function puzzleProgress(puzzle) {
   return {
-    turnsUsed: puzzle.guesses.length,
-    maxTurns: puzzle.maxTurns,
-    solved: puzzle.solved,
-    guesses: puzzle.guesses
+    ok: true,
+    cleaned,
+    feedback,
+    solved
   };
 }
