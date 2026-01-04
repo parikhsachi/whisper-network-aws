@@ -287,12 +287,6 @@ export default function App() {
               <div className="row">
                 <button className="primary" onClick={join}>ENTER COLLAB</button>
               </div>
-
-              <div className="hint">
-                This is a local demo that mimics Clean Rooms:
-                <br />
-                <span className="dim">tapes are private, only whitelisted aggregate queries return results.</span>
-              </div>
             </div>
           </Window>
         </div>
@@ -359,7 +353,7 @@ export default function App() {
             </div>
           </Window>
 
-          <Window title="SCRIPTS" right="PROTECTED QUERIES" grow={1}>
+          <Window title="SCRIPTS" right="PROTECTED QUERIES" >
             <div className="queries">
               {queries.map((q) => (
                 <div key={q.name} className="qrow">
@@ -375,7 +369,7 @@ export default function App() {
         </div>
 
         <div className="col">
-          <Window title="TRANSFER" right="CHAT LINK" grow={2}>
+          <Window title="TRANSFER" right="CHAT LINK" >
             <ChatPanel
               chat={chat}
               onSend={sendChat}
@@ -411,7 +405,7 @@ export default function App() {
 
 function Window(props: { title: string; right?: string; grow?: number; children: any }) {
   return (
-    <div className="win" style={{ flex: props.grow ?? 1 }}>
+    <div className="win">
       <div className="winbar">
         <div className="wintitle">{props.title}</div>
         <div className="winright">{props.right || ""}</div>
