@@ -33,4 +33,4 @@ export CLEANROOMS_RECEIVER_ROLE_MAIN="cleanrooms-query-receiver-20260102162004"
 
 export RESULTS_BUCKET_B="spywhisper-results-b-${ACCT_B}"
 export RESULTS_PREFIX_B="cleanrooms/results/"
-export MEMBERSHIP_B_ID="0b128a31-f33a-4016-adcf-12877419ad15"
+export MEMBERSHIP_B_ID=MEMBERSHIP_B_ID_PLACEHOLDER
