@@ -41,7 +41,7 @@ function ensureRoom(code) {
     createdAt: Date.now(),
     members: new Map(), // sessionId -> { name, role }
     chat: [],
-
+    gameOver: false,
     puzzle,
 
     // PRIVATE per-role Wordle boards (never broadcast)
@@ -288,6 +288,20 @@ app.post("/api/puzzle/guess", (req, res) => {
 
   const member = room.members.get(sessionId);
   if (!member) return res.status(401).json({ error: "invalid session" });
+  if (room.gameOver) {
+  const winner = computeGameWinner(room);
+  return res.json({
+    ok: true,
+    locked: true,
+    gameOver: true,
+    winner,
+    message: winner === "DRAW"
+      ? `No one won this game.`
+      : `Agent "${winner}" won this game.`,
+    dash: dashPayload(room)
+  });
+}
+
 
   // round locked?
   if (room.round.winnerRole || room.round.lockout) {
@@ -395,31 +409,39 @@ room.scores.B += roundScores.B;
   // if either role reaches max turns and still unsolved => global lockout (both 0/10)
   const aTurns = room.boards.A.guesses.length;
   const bTurns = room.boards.B.guesses.length;
-  if (aTurns >= maxTurns && bTurns >= maxTurns) {
-    room.round.lockout = true;
+ if (aTurns >= maxTurns && bTurns >= maxTurns) {
+  room.round.lockout = true;
+  room.gameOver = true;
 
-    broadcast(roomCode, {
-      type: "lockout",
-      dash: dashPayload(room),
-      roundScores: { A: 0, B: 0 },
-      totalScores: room.scores
-    });
+  const winner = computeGameWinner(room);
 
-    setTimeout(() => {
-      resetRound(room);
-      broadcast(roomCode, {
-        type: "puzzle_new",
-        puzzle: {
-          id: room.puzzle.id,
-          title: room.puzzle.title,
-          prompt: room.puzzle.prompt,
-          keyLen: room.puzzle.keyLen,
-          maxTurns: room.puzzle.maxTurns
-        },
-        dash: dashPayload(room)
-      });
-    }, 800);
-  }
+  const message =
+    winner === "DRAW"
+      ? `No one won this game.`
+      : `Agent "${winner}" won this game.`;
+
+  broadcast(roomCode, {
+    type: "game_over",
+    reason: "lockout",
+    winner,
+    message,
+    dash: dashPayload(room) // includes totals
+  });
+
+  return res.json({
+    ok: true,
+    gameOver: true,
+    winner,
+    message,
+    dash: dashPayload(room),
+    progress: {
+      keyLen: room.puzzle.keyLen,
+      maxTurns: room.puzzle.maxTurns,
+      guesses: room.boards[member.role].guesses
+    }
+  });
+}
+
 
   // update dashboard every guess
   broadcast(roomCode, {
@@ -526,6 +548,15 @@ function broadcast(roomCode, payload) {
     if (meta.roomCode === roomCode && ws.readyState === ws.OPEN) ws.send(data);
   }
 }
+
+function computeGameWinner(room) {
+  const a = room.scores.A || 0;
+  const b = room.scores.B || 0;
+  if (a > b) return "A";
+  if (b > a) return "B";
+  return "DRAW";
+}
+
 
 const PORT = process.env.PORT || 8787;
 server.listen(PORT, "0.0.0.0", () => {

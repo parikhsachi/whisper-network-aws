@@ -55,6 +55,11 @@ export default function App() {
   const [chat, setChat] = useState<any[]>([]);
   const [statusLine, setStatusLine] = useState("SYSTEM: idle");
 
+  const [gameOver, setGameOver] = useState(false);
+const [gameOverMsg, setGameOverMsg] = useState("");
+const [gameWinner, setGameWinner] = useState<"A" | "B" | "DRAW" | "">("");
+
+
   const [puzzle, setPuzzle] = useState<any>(null);
   const [puzzleGuess, setPuzzleGuess] = useState("");
   const [puzzleHint, setPuzzleHint] = useState("");
@@ -131,6 +136,14 @@ export default function App() {
         setPuzzle(msg.puzzle);
         if (msg.dash) setDash(msg.dash);
       }
+      if (msg.type === "game_over") {
+  setGameOver(true);
+  setGameWinner(msg.winner || "");
+  setGameOverMsg(msg.message || "");
+  if (msg.dash) setDash(msg.dash);
+  setStatusLine(msg.message || "GAME OVER");
+}
+
 
       if (msg.type === "presence") {
         setPresence(msg.members || []);
@@ -207,6 +220,12 @@ export default function App() {
     if (out.hint) setPuzzleHint(out.hint);
     if (out.progress) setMyProgress(out.progress);
     if (out.dash) setDash(out.dash);
+    if (out.gameOver) {
+  setGameOver(true);
+  setGameWinner(out.winner || "");
+  setGameOverMsg(out.message || "");
+}
+
   };
 
   const headerMeta = useMemo(() => {
@@ -269,6 +288,22 @@ export default function App() {
 
   return (
     <div className="bg">
+{gameOver && (
+  <div className="overlay">
+    <div className="modal">
+      <div className="modalHeader">YOU ARE NOW LOCKED OUT</div>
+
+      <div className="modalBody">
+        <div className="modalText">{gameOverMsg}</div>
+
+        <div className="modalSub dim">
+          Final Score | Agent A: {dash?.totalScores?.A ?? 0}   Agent B: {dash?.totalScores?.B ?? 0}
+        </div>
+      </div>
+
+    </div>
+  </div>
+)}
       <div className="topbar">
         <div className="brand">WHISPER NETWORK</div>
 
