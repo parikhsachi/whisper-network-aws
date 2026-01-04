@@ -127,6 +127,16 @@ app.post("/api/puzzle/guess", (req, res) => {
   const member = room.members.get(sessionId);
   if (!member) return res.status(401).json({ error: "invalid session" });
 
+    if (room.round.winnerRole) {
+    return res.json({
+        ok: true,
+        solved: false,
+        locked: true,
+        progress: puzzleProgress(room.puzzle),
+        winnerRole: room.round.winnerRole,
+        hint: "ROUND LOCKED — winner already declared"
+    });
+    }
   const g = String(guess || "").trim();
   const outcome = checkPuzzleGuess(room.puzzle, g);
 
@@ -142,11 +152,12 @@ app.post("/api/puzzle/guess", (req, res) => {
       type: "system",
       text: `Puzzle solved by ${member.role}. New puzzle generated.`
     });
+
     room.puzzle = makePuzzle();
     room.round.puzzleId = room.puzzle.id;
     room.round.winnerRole = null;
     room.round.solvedAt = null;
-    
+
     broadcast(roomCode, {
       type: "puzzle_new",
       puzzle: {
